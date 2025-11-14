@@ -1,327 +1,286 @@
-"""
-SatChat MVP - Main Flask Application
-Bitcoin on WhatsApp using Twilio and Bitnob API
-"""
-
 from flask import Flask, request, jsonify
-from twilio.twiml.messaging_response import MessagingResponse
+import logging
 import os
+from datetime import datetime
 
-# Import configuration
-from config import config
+# Local imports
+from config import get_config
+from models.database import init_db
+from models.user import get_user_by_phone
+from services.bitnob_service import BitnobService
+from services.twilio_service import TwilioService, create_twilio_service
+from services.otp_service import create_otp_service
+from handlers.commands import create_command_handler
+from handlers.registration import create_registration_handler
+from handlers.transaction import create_transaction_handler, handle_bitnob_webhook
+from utils.helpers import normalize_phone_number, log_user_action
+from utils.validators import MessageValidator
 
-# Import database
-from models.database import db, init_db, WebhookEvent
-
-# Import handlers
-from handlers.commands import command_handler
-
-# Import services
-from services.twilio_service import twilio_service
-
-# Import models
-from models.user import SessionManager
-from services.otp_service import otp_service
-
-# Create Flask app
+# Initialize Flask app
 app = Flask(__name__)
 
 # Load configuration
-env = os.environ.get('FLASK_ENV', 'development')
-app.config.from_object(config[env])
+config = get_config()
+app.config.from_object(config)
 
 # Initialize database
-db.init_app(app)
+init_db(app)
 
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, app.config['LOG_LEVEL']),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Create tables on first run
-@app.before_first_request
-def create_tables():
-    """Create database tables if they don't exist"""
+# Initialize services
+bitnob_service = BitnobService(
+    api_key=app.config['BITNOB_API_KEY'],
+    secret_key=app.config['BITNOB_SECRET_KEY'],
+    base_url=app.config['BITNOB_BASE_URL']
+)
+
+twilio_service = create_twilio_service(
+    account_sid=app.config['TWILIO_ACCOUNT_SID'],
+    auth_token=app.config['TWILIO_AUTH_TOKEN'],
+    phone_number=app.config['TWILIO_PHONE_NUMBER']
+)
+
+otp_service = create_otp_service(
+    expiry_minutes=app.config['OTP_EXPIRY_MINUTES'],
+    max_attempts=app.config['MAX_OTP_ATTEMPTS']
+)
+
+# Initialize handlers
+command_handler = create_command_handler(bitnob_service, twilio_service, otp_service)
+registration_handler = create_registration_handler(bitnob_service, twilio_service, otp_service)
+transaction_handler = create_transaction_handler(bitnob_service, twilio_service, otp_service)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.utcnow().isoformat(),
+        'version': '1.0.0'
+    })
+
+@app.route('/webhook/twilio', methods=['POST'])
+def twilio_webhook():
+    """Handle incoming WhatsApp messages from Twilio"""
     try:
-        db.create_all()
-        print("✅ Database tables created successfully!")
+        # Validate webhook signature in production
+        if app.config['ENVIRONMENT'] == 'production':
+            if not _validate_twilio_webhook():
+                logger.warning("Invalid Twilio webhook signature")
+                return "Unauthorized", 401
+        
+        # Extract message data
+        from_number = request.form.get('From', '').replace('whatsapp:', '')
+        message_body = request.form.get('Body', '').strip()
+        
+        if not from_number or not message_body:
+            logger.warning("Invalid webhook data received")
+            return "Bad Request", 400
+        
+        # Validate message content
+        message_validation = MessageValidator.validate_message_content(message_body)
+        if not message_validation['valid']:
+            logger.warning(f"Invalid message content from {from_number}")
+            response_message = "Invalid message format. Please try again."
+        else:
+            # Process the message
+            response_message = command_handler.handle_message(from_number, message_body)
+        
+        # Return TwiML response
+        twiml_response = twilio_service.create_twiml_response(response_message)
+        
+        return twiml_response, 200, {'Content-Type': 'text/xml'}
+        
     except Exception as e:
-        print(f"❌ Error creating tables: {str(e)}")
-
-
-# Routes
-@app.route('/', methods=['GET'])
-def index():
-    """Landing page"""
-    return """
-    <html>
-        <head>
-            <title>SatChat - Bitcoin on WhatsApp</title>
-            <style>
-                body {
-                    font-family: 'Segoe UI', Arial, sans-serif;
-                    max-width: 800px;
-                    margin: 50px auto;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                }
-                .container {
-                    background: rgba(255, 255, 255, 0.95);
-                    color: #333;
-                    padding: 40px;
-                    border-radius: 20px;
-                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                }
-                h1 { color: #667eea; margin: 0; }
-                h3 { color: #764ba2; margin: 10px 0; }
-                .status {
-                    display: inline-block;
-                    background: #10b981;
-                    color: white;
-                    padding: 5px 15px;
-                    border-radius: 20px;
-                    font-size: 14px;
-                }
-                .command {
-                    background: #f3f4f6;
-                    padding: 15px;
-                    border-radius: 10px;
-                    margin: 10px 0;
-                    border-left: 4px solid #667eea;
-                }
-                .command strong {
-                    color: #667eea;
-                }
-                ul {
-                    list-style: none;
-                    padding: 0;
-                }
-                li {
-                    padding: 8px 0;
-                    border-bottom: 1px solid #e5e7eb;
-                }
-                li:last-child {
-                    border-bottom: none;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🚀 SatChat</h1>
-                <h3>Bitcoin on WhatsApp</h3>
-                <p><span class="status">● Online</span></p>
-                
-                <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 30px 0;">
-                
-                <h4>📱 Get Started</h4>
-                <div class="command">
-                    <p>Send a WhatsApp message to:</p>
-                    <p><strong>{}</strong></p>
-                    <p>Start with: <strong>HI</strong></p>
-                </div>
-                
-                <h4>📖 Available Commands</h4>
-                <ul>
-                    <li><strong>HI</strong> - Start or create account</li>
-                    <li><strong>BALANCE</strong> - Check your Bitcoin balance</li>
-                    <li><strong>SEND &lt;amount&gt; TO &lt;address&gt;</strong> - Send Bitcoin</li>
-                    <li><strong>HELP</strong> - Get help</li>
-                </ul>
-                
-                <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 30px 0;">
-                
-                <p style="text-align: center; color: #6b7280; font-size: 14px;">
-                    <em>Secure • Simple • Fast</em>
-                </p>
-            </div>
-        </body>
-    </html>
-    """.format(app.config.get('TWILIO_WHATSAPP_NUMBER', 'Not configured'))
-
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """
-    Handle incoming WhatsApp messages from Twilio
-    """
-    try:
-        # Get message data
-        incoming_msg = request.values.get('Body', '').strip()
-        from_number = request.values.get('From', '').replace('whatsapp:', '')
-        
-        print(f"📩 Received: '{incoming_msg}' from {from_number}")
-        
-        # Process message through command handler
-        response_text = command_handler.handle_message(from_number, incoming_msg)
-        
-        # Create Twilio response
-        resp = MessagingResponse()
-        msg = resp.message()
-        msg.body(response_text)
-        
-        print(f"📤 Response sent to {from_number}")
-        
-        return str(resp)
-    
-    except Exception as e:
-        print(f"❌ Error in webhook: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
-        # Send error response
-        resp = MessagingResponse()
-        msg = resp.message()
-        msg.body("❌ An error occurred. Please try again later or contact support.")
-        return str(resp)
-
+        logger.error(f"Twilio webhook error: {e}")
+        error_response = twilio_service.create_twiml_response(
+            "Sorry, something went wrong. Please try again later."
+        )
+        return error_response, 500, {'Content-Type': 'text/xml'}
 
 @app.route('/webhook/bitnob', methods=['POST'])
 def bitnob_webhook():
-    """
-    Handle webhooks from Bitnob for transaction updates
-    """
+    """Handle Bitnob webhook notifications"""
     try:
-        data = request.get_json()
+        # Validate webhook signature in production
+        if app.config['ENVIRONMENT'] == 'production':
+            if not _validate_bitnob_webhook():
+                logger.warning("Invalid Bitnob webhook signature")
+                return jsonify({'error': 'Unauthorized'}), 401
         
-        # Log webhook event
-        event = WebhookEvent(
-            event_type=data.get('event', 'unknown'),
-            event_source='bitnob',
-            payload=data,
-            is_verified=True,  # Add signature verification in production
-            processed=False
-        )
-        db.session.add(event)
-        db.session.commit()
+        webhook_data = request.get_json()
         
-        # Process event
-        event_type = data.get('event')
-        transaction = data.get('data', {})
+        if not webhook_data:
+            logger.warning("Empty Bitnob webhook data")
+            return jsonify({'error': 'Bad Request'}), 400
         
-        if event_type == 'transaction.success':
-            customer_phone = transaction.get('customerPhone')
-            if customer_phone:
-                message = (
-                    f"✅ *Transaction Confirmed!*\n\n"
-                    f"Reference: {transaction.get('reference')}\n"
-                    f"Status: Completed"
-                )
-                twilio_service.send_message(customer_phone, message)
+        # Process webhook
+        result = handle_bitnob_webhook(webhook_data, bitnob_service)
         
-        elif event_type == 'transaction.failed':
-            customer_phone = transaction.get('customerPhone')
-            if customer_phone:
-                message = (
-                    f"❌ *Transaction Failed*\n\n"
-                    f"Reference: {transaction.get('reference')}\n"
-                    f"Reason: {transaction.get('failureReason', 'Unknown')}"
-                )
-                twilio_service.send_message(customer_phone, message)
-        
-        # Mark as processed
-        event.processed = True
-        db.session.commit()
-        
-        return jsonify({'status': 'success'}), 200
-    
+        if result['success']:
+            return jsonify({'status': 'processed'}), 200
+        else:
+            logger.error(f"Bitnob webhook processing failed: {result}")
+            return jsonify({'error': 'Processing failed'}), 500
+            
     except Exception as e:
-        print(f"❌ Error in Bitnob webhook: {str(e)}")
-        return jsonify({'error': 'Internal error'}), 500
+        logger.error(f"Bitnob webhook error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint"""
+@app.route('/api/user/<phone_number>/balance', methods=['GET'])
+def get_user_balance_api(phone_number):
+    """API endpoint to get user balance"""
     try:
-        # Check database connection
-        db.session.execute('SELECT 1')
+        # This endpoint could be used by admin interfaces or monitoring
+        # Add authentication/authorization as needed
+        
+        normalized_phone = normalize_phone_number(phone_number)
+        user = get_user_by_phone(normalized_phone)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        if not user.is_kyc_completed:
+            return jsonify({'error': 'User account not complete'}), 400
+        
+        # Get balance via Bitnob
+        balance_result = bitnob_service.get_wallet_balance(user.bitnob_wallet_id)
+        
+        if balance_result.get('error'):
+            return jsonify({'error': 'Failed to get balance'}), 500
+        
+        balance_data = balance_result.get('data', {})
         
         return jsonify({
-            'status': 'healthy',
-            'database': 'connected',
-            'timestamp': datetime.now().isoformat()
+            'phone_number': normalized_phone,
+            'balance': float(balance_data.get('available', 0)),
+            'currency': 'BTC',
+            'wallet_address': user.bitcoin_address,
+            'updated_at': datetime.utcnow().isoformat()
         })
+        
     except Exception as e:
-        return jsonify({
-            'status': 'unhealthy',
-            'error': str(e),
-            'timestamp': datetime.now().isoformat()
-        }), 500
+        logger.error(f"Get balance API error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
+@app.route('/api/user/<phone_number>/transactions', methods=['GET'])
+def get_user_transactions_api(phone_number):
+    """API endpoint to get user transactions"""
+    try:
+        normalized_phone = normalize_phone_number(phone_number)
+        user = get_user_by_phone(normalized_phone)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Get transaction history
+        result = transaction_handler.get_transaction_history(user)
+        
+        if result['success']:
+            return jsonify({
+                'phone_number': normalized_phone,
+                'transactions': result['transactions'],
+                'count': len(result['transactions'])
+            })
+        else:
+            return jsonify({'error': result.get('message', 'Failed to get transactions')}), 500
+            
+    except Exception as e:
+        logger.error(f"Get transactions API error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/stats', methods=['GET'])
-def stats():
-    """Basic statistics endpoint"""
+def get_stats():
+    """Get system statistics"""
     try:
-        from models.database import User, Transaction
+        from models.user import User, Transaction
         
         total_users = User.query.count()
+        active_users = User.query.filter_by(is_kyc_completed=True).count()
         total_transactions = Transaction.query.count()
-        pending_transactions = Transaction.query.filter_by(status='pending').count()
         
         return jsonify({
             'total_users': total_users,
+            'active_users': active_users,
             'total_transactions': total_transactions,
-            'pending_transactions': pending_transactions,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.utcnow().isoformat()
         })
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Get stats error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
-
-# Cleanup task (run periodically via scheduler)
-@app.route('/admin/cleanup', methods=['POST'])
-def cleanup():
-    """
-    Cleanup expired sessions and OTPs
-    Protect this endpoint in production!
-    """
+def _validate_twilio_webhook():
+    """Validate Twilio webhook signature"""
     try:
-        # Add authentication here in production
-        auth_token = request.headers.get('X-Admin-Token')
-        if auth_token != os.environ.get('ADMIN_TOKEN'):
-            return jsonify({'error': 'Unauthorized'}), 401
+        signature = request.headers.get('X-Twilio-Signature', '')
+        url = request.url
         
-        # Cleanup expired sessions
-        SessionManager.cleanup_expired_sessions()
+        return twilio_service.validate_webhook(url, request.form, signature)
         
-        # Cleanup expired OTPs
-        otp_service.cleanup_expired_otps()
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Cleanup completed'
-        })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Twilio webhook validation error: {e}")
+        return False
 
+def _validate_bitnob_webhook():
+    """Validate Bitnob webhook signature"""
+    try:
+        signature = request.headers.get('X-Bitnob-Signature', '')
+        payload = request.get_data(as_text=True)
+        
+        return bitnob_service.verify_webhook(payload, signature)
+        
+    except Exception as e:
+        logger.error(f"Bitnob webhook validation error: {e}")
+        return False
 
-# Error handlers
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'error': 'Not found'}), 404
 
-
 @app.errorhandler(500)
 def internal_error(error):
-    db.session.rollback()
+    logger.error(f"Internal server error: {error}")
     return jsonify({'error': 'Internal server error'}), 500
 
+@app.before_request
+def log_request():
+    """Log incoming requests"""
+    if request.endpoint != 'health_check':
+        logger.info(f"{request.method} {request.path} from {request.remote_addr}")
 
-# Import datetime for health check
-from datetime import datetime
-
+@app.after_request
+def after_request(response):
+    """Log response and add security headers"""
+    # Add security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    
+    if app.config['ENVIRONMENT'] == 'production':
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    return response
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    
-    # Create tables if they don't exist
-    with app.app_context():
-        try:
-            db.create_all()
-            print("✅ Database initialized successfully!")
-        except Exception as e:
-            print(f"❌ Database initialization error: {str(e)}")
-    
-    print(f"🚀 SatChat MVP starting on port {port}")
-    print(f"📱 WhatsApp Number: {app.config.get('TWILIO_WHATSAPP_NUMBER')}")
-    print(f"🗄️  Database: {app.config.get('MYSQL_DATABASE')}")
-    
-    app.run(host='0.0.0.0', port=port, debug=app.config.get('DEBUG', False))
+    # Development server
+    if app.config['ENVIRONMENT'] == 'development':
+        app.run(
+            host='0.0.0.0',
+            port=int(os.getenv('PORT', 5000)),
+            debug=app.config['DEBUG']
+        )
+    else:
+        # Production should use a proper WSGI server like Gunicorn
+        logger.info("Use a production WSGI server like Gunicorn for production deployment")
+        app.run(
+            host='0.0.0.0',
+            port=int(os.getenv('PORT', 5000)),
+            debug=False
+        )
