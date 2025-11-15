@@ -56,6 +56,15 @@ command_handler = create_command_handler(bitnob_service, twilio_service, otp_ser
 registration_handler = create_registration_handler(bitnob_service, twilio_service, otp_service)
 transaction_handler = create_transaction_handler(bitnob_service, twilio_service, otp_service)
 
+@app.route('/', methods=['GET', 'HEAD'])
+def root():
+    """Root endpoint for Render health checks"""
+    return jsonify({
+        'service': 'SatsPay',
+        'status': 'running',
+        'timestamp': datetime.utcnow().isoformat()
+    })
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -269,18 +278,12 @@ def after_request(response):
     return response
 
 if __name__ == '__main__':
-    # Development server
-    if app.config['ENVIRONMENT'] == 'development':
-        app.run(
-            host='0.0.0.0',
-            port=int(os.getenv('PORT', 5000)),
-            debug=app.config['DEBUG']
-        )
-    else:
-        # Production should use a proper WSGI server like Gunicorn
-        logger.info("Use a production WSGI server like Gunicorn for production deployment")
-        app.run(
-            host='0.0.0.0',
-            port=int(os.getenv('PORT', 5000)),
-            debug=False
-        )
+    # Development server only - Gunicorn doesn't execute this block
+    port = int(os.getenv('PORT', 5000))
+    debug = app.config.get('ENVIRONMENT') == 'development'
+    
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=debug
+    )
