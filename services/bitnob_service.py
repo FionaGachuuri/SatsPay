@@ -48,29 +48,43 @@ class BitnobService:
             'X-Signature': signature
         }
         
+        # Add debug logging
+        logger.debug(f"Making {method} request to: {url}")
+        if body:
+            logger.debug(f"Request body: {body}")
+        
         try:
             if method.upper() == 'GET':
                 response = self.session.get(url, headers=headers, params=data)
             elif method.upper() == 'POST':
-                response = self.session.post(url, headers=headers, data=body)
+                # Ensure content-type is set correctly for JSON
+                if body:
+                    headers['Content-Type'] = 'application/json'
+                response = self.session.post(url, headers=headers, json=data if data else None)
             elif method.upper() == 'PUT':
-                response = self.session.put(url, headers=headers, data=body)
+                if body:
+                    headers['Content-Type'] = 'application/json'
+                response = self.session.put(url, headers=headers, json=data if data else None)
             elif method.upper() == 'DELETE':
                 response = self.session.delete(url, headers=headers)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
+            
+            logger.debug(f"Response status: {response.status_code}")
             
             response.raise_for_status()
             return response.json()
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Bitnob API request failed: {e}")
+            
             if hasattr(e, 'response') and e.response is not None:
                 try:
                     error_data = e.response.json()
                     logger.error(f"Error response: {error_data}")
                     return {'error': True, 'message': error_data.get('message', str(e))}
                 except:
+                    logger.error(f"Raw response content: {e.response.text}")
                     pass
             return {'error': True, 'message': str(e)}
     
@@ -85,7 +99,9 @@ class BitnobService:
         }
         
         logger.info(f"Creating Bitnob customer for {phone_number}")
-        result = self._make_request('POST', '/customers', data)
+        
+        # Use the correct API endpoint
+        result = self._make_request('POST', '/api/v1/customers', data)
         
         if not result.get('error'):
             logger.info(f"Customer created successfully: {result.get('data', {}).get('id')}")
@@ -102,7 +118,9 @@ class BitnobService:
         }
         
         logger.info(f"Creating Bitcoin wallet for customer {customer_id}")
-        result = self._make_request('POST', '/wallets', data)
+        
+        # Use the correct API endpoint
+        result = self._make_request('POST', '/api/v1/wallets', data)
         
         if not result.get('error'):
             logger.info(f"Wallet created successfully: {result.get('data', {}).get('id')}")
@@ -114,7 +132,7 @@ class BitnobService:
     def get_wallet_balance(self, wallet_id: str) -> Dict[str, Any]:
         """Get wallet balance"""
         logger.info(f"Getting balance for wallet {wallet_id}")
-        result = self._make_request('GET', f'/wallets/{wallet_id}/balance')
+        result = self._make_request('GET', f'/api/v1/wallets/{wallet_id}/balance')
         
         if result.get('error'):
             logger.error(f"Failed to get wallet balance: {result.get('message')}")
@@ -124,7 +142,7 @@ class BitnobService:
     def get_wallet_address(self, wallet_id: str) -> Dict[str, Any]:
         """Get wallet Bitcoin address"""
         logger.info(f"Getting address for wallet {wallet_id}")
-        result = self._make_request('GET', f'/wallets/{wallet_id}/address')
+        result = self._make_request('GET', f'/api/v1/wallets/{wallet_id}/address')
         
         if result.get('error'):
             logger.error(f"Failed to get wallet address: {result.get('message')}")
@@ -142,7 +160,7 @@ class BitnobService:
         }
         
         logger.info(f"Sending {amount} BTC from wallet {wallet_id} to {recipient_address}")
-        result = self._make_request('POST', '/transactions/send', data)
+        result = self._make_request('POST', '/api/v1/transactions/send', data)
         
         if not result.get('error'):
             logger.info(f"Transaction initiated successfully: {result.get('data', {}).get('id')}")
@@ -154,7 +172,7 @@ class BitnobService:
     def get_transaction(self, transaction_id: str) -> Dict[str, Any]:
         """Get transaction details"""
         logger.info(f"Getting transaction details for {transaction_id}")
-        result = self._make_request('GET', f'/transactions/{transaction_id}')
+        result = self._make_request('GET', f'/api/v1/transactions/{transaction_id}')
         
         if result.get('error'):
             logger.error(f"Failed to get transaction: {result.get('message')}")
@@ -169,7 +187,7 @@ class BitnobService:
         }
         
         logger.info(f"Getting transactions for wallet {wallet_id}")
-        result = self._make_request('GET', '/transactions', params)
+        result = self._make_request('GET', '/api/v1/transactions', params)
         
         if result.get('error'):
             logger.error(f"Failed to get wallet transactions: {result.get('message')}")
@@ -184,7 +202,7 @@ class BitnobService:
         }
         
         logger.info(f"Validating Bitcoin address: {address}")
-        result = self._make_request('POST', '/addresses/validate', data)
+        result = self._make_request('POST', '/api/v1/addresses/validate', data)
         
         if result.get('error'):
             logger.error(f"Failed to validate address: {result.get('message')}")
@@ -199,7 +217,7 @@ class BitnobService:
         }
         
         logger.info(f"Estimating fee for {amount} BTC")
-        result = self._make_request('POST', '/transactions/estimate-fee', data)
+        result = self._make_request('POST', '/api/v1/transactions/estimate-fee', data)
         
         if result.get('error'):
             logger.error(f"Failed to estimate fee: {result.get('message')}")
@@ -214,7 +232,7 @@ class BitnobService:
         }
         
         logger.info(f"Getting BTC to {currency} exchange rate")
-        result = self._make_request('GET', '/rates', params)
+        result = self._make_request('GET', '/api/v1/rates', params)
         
         if result.get('error'):
             logger.error(f"Failed to get exchange rate: {result.get('message')}")
@@ -234,6 +252,44 @@ class BitnobService:
         except Exception as e:
             logger.error(f"Webhook verification failed: {e}")
             return False
+
+    def test_api_connection(self) -> Dict[str, Any]:
+        """Test API connection and available endpoints"""
+        logger.info("Testing Bitnob API connection")
+        
+        # Test endpoints that might exist
+        test_endpoints = [
+            ('GET', '/api/v1/status'),
+            ('GET', '/v1/status'),
+            ('GET', '/status'),
+            ('GET', '/health'),
+            ('GET', '/api/health'),
+            ('GET', '/api/v1/health'),
+            ('GET', '/'),
+            ('GET', '/api/v1/rates'),
+            ('GET', '/rates')
+        ]
+        
+        results = {}
+        for method, endpoint in test_endpoints:
+            try:
+                logger.info(f"Testing {method} {endpoint}")
+                result = self._make_request(method, endpoint)
+                results[endpoint] = {
+                    'success': not result.get('error', False),
+                    'response': result
+                }
+                if not result.get('error'):
+                    logger.info(f"SUCCESS: {endpoint} is accessible")
+                    break  # Found a working endpoint
+            except Exception as e:
+                results[endpoint] = {
+                    'success': False,
+                    'error': str(e)
+                }
+                logger.warning(f"FAILED: {endpoint} - {e}")
+        
+        return results
 
 # Utility functions for common operations
 def create_bitnob_account(bitnob_service: BitnobService, full_name: str, email: str, phone_number: str) -> Optional[Dict]:
