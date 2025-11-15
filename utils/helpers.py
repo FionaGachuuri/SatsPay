@@ -215,8 +215,9 @@ def detect_message_intent(message: str) -> str:
     # Confirmation patterns (YES, yes, Yes, etc.)
     confirm_patterns = [
         r'^(yes|y|ok|okay|confirm|sure|yep|yeah|yup|si|oui)$',
-        r'^(create|start|begin)\s+(account|wallet|bitcoin|btc)',
-        r'^(i\s+want|want\s+to|please)\s+(create|start|begin)',
+        r'(create|start|begin)\s+(account|wallet|bitcoin|btc)',
+        r'(i\s+want|want\s+to|please)\s+(create|start|begin)',
+        r'(create|make|generate).*wallet',
     ]
     
     for pattern in confirm_patterns:
@@ -234,7 +235,7 @@ def detect_message_intent(message: str) -> str:
     
     # Greeting patterns
     greeting_patterns = [
-        r'^(hi|hello|hey|start|begin|good\s+(morning|afternoon|evening))$',
+        r'^(hi|hello|hey|good\s+(morning|afternoon|evening))$',
         r'^\w*(hi|hello|hey)\w*$',
     ]
     
@@ -247,6 +248,7 @@ def detect_message_intent(message: str) -> str:
         r'(send|transfer|pay|give)\s+.*\s*(btc|bitcoin)',
         r'(send|transfer|pay|give)\s+[\d.]+',
         r'i\s+(want\s+to\s+|need\s+to\s+)?(send|transfer|pay)',
+        r'^(transfer|pay).*money',
     ]
     
     for pattern in send_patterns:
@@ -269,7 +271,7 @@ def detect_message_intent(message: str) -> str:
     # History patterns
     history_patterns = [
         r'^(history|transactions|activity|statement)$',
-        r'(show|view|check|get).*history',
+        r'(show|view|check|get).*(history|transactions)',
         r'(my|recent|past)\s+(transactions|history|activity)',
         r'transaction\s+(history|list)',
     ]
@@ -283,7 +285,6 @@ def detect_message_intent(message: str) -> str:
         r'^(address|receive|deposit)$',
         r'(my|bitcoin|btc|wallet)\s+(address|id)',
         r'(receive|get)\s+(bitcoin|btc|money)',
-        r'(create|make|generate).*wallet',
         r'how\s+to\s+receive',
         r'where.*send.*me',
     ]
@@ -308,8 +309,11 @@ def detect_message_intent(message: str) -> str:
     if re.match(r'^\d{6}$', normalized):
         return 'otp'
     
-    # Check if it's a valid name (for registration)
-    if len(normalized.split()) >= 2 and all(word.isalpha() for word in normalized.split()):
+    # Check if it's a valid name (for registration) - but be more restrictive
+    words = normalized.split()
+    if (len(words) == 2 and 
+        all(word.isalpha() and len(word) >= 2 for word in words) and
+        not any(word in ['want', 'need', 'can', 'how', 'what', 'where', 'when', 'random', 'gibberish', 'history', 'start', 'begin'] for word in words)):
         return 'name_input'
     
     # Check if it's an email
