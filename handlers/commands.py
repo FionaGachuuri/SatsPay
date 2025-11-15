@@ -6,7 +6,8 @@ from services.twilio_service import MessageFormatter
 from services.otp_service import OTPService, OTPPurpose
 from utils.helpers import (
     detect_message_intent, parse_send_command, format_bitcoin_amount,
-    generate_reference_number, log_user_action, normalize_phone_number
+    generate_reference_number, log_user_action, normalize_phone_number,
+    normalize_text, strip_sandbox_prefix
 )
 from utils.validators import (
     validate_send_command, TransactionValidator, BitcoinValidator
@@ -28,20 +29,23 @@ class CommandHandler:
             # Normalize phone number
             phone_number = normalize_phone_number(phone_number)
             
-            # Log user action
-            log_user_action(phone_number, "message_received", message[:50])
+            # Clean message: strip sandbox prefixes and normalize
+            cleaned_message = strip_sandbox_prefix(message)
+            
+            # Log user action with cleaned message
+            log_user_action(phone_number, "message_received", cleaned_message[:50])
             
             # Get or create user
             user = get_user_by_phone(phone_number)
             
-            # Detect intent
-            intent = detect_message_intent(message)
+            # Detect intent from cleaned message
+            intent = detect_message_intent(cleaned_message)
             
             # Handle based on current session state or intent
             if user and user.current_session_state:
-                return self._handle_session_state(user, message, intent)
+                return self._handle_session_state(user, cleaned_message, intent)
             else:
-                return self._handle_intent(user, phone_number, message, intent)
+                return self._handle_intent(user, phone_number, cleaned_message, intent)
                 
         except Exception as e:
             logger.error(f"Error handling message from {phone_number}: {e}")
@@ -50,32 +54,60 @@ class CommandHandler:
     def _handle_intent(self, user: Optional[User], phone_number: str, message: str, intent: str) -> str:
         """Handle message based on detected intent"""
         
+        # Handle greeting - always show appropriate welcome message
         if intent == 'greeting':
             return self._handle_greeting(user, phone_number)
         
-        elif intent == 'confirm' and not user:
-            return self._handle_registration_start(phone_number)
+        # Handle confirmation (YES/yes/Yes etc.)
+        if intent == 'confirm':
+            if not user:
+                # User wants to start registration
+                return self._handle_registration_start(phone_number)
+            elif user and not user.is_kyc_completed:
+                # User exists but registration not complete - resume registration
+                return self._handle_registration_start(phone_number)
+            else:
+                # User is complete - this might be confirming something else
+                return MessageFormatter.error_message("Nothing to confirm right now. Try 'Help' for available commands.")
         
-        elif user and intent == 'send':
-            return self._handle_send_command(user, message)
+        # Check if user exists and is complete for transactional commands
+        if user and user.is_kyc_completed:
+            if intent == 'send':
+                return self._handle_send_command(user, message)
+            elif intent == 'balance':
+                return self._handle_balance_command(user)
+            elif intent == 'history':
+                return self._handle_history_command(user)
+            elif intent == 'address':
+                return self._handle_address_command(user)
         
-        elif user and intent == 'balance':
-            return self._handle_balance_command(user)
+        # Handle commands for incomplete users
+        elif user and not user.is_kyc_completed:
+            if intent in ['send', 'balance', 'history', 'address']:
+                return MessageFormatter.error_message(
+                    "⚠️ Your account setup is not complete.\n\n"
+                    "Please complete your registration first. Reply *YES* to continue setup."
+                )
+            elif intent == 'help':
+                return MessageFormatter.help_message()
+            else:
+                # Try to resume registration
+                return self._handle_registration_start(phone_number)
         
-        elif user and intent == 'history':
-            return self._handle_history_command(user)
-        
-        elif user and intent == 'address':
-            return self._handle_address_command(user)
-        
+        # Handle help - always available
         elif intent == 'help':
             return MessageFormatter.help_message()
         
+        # Handle no user - show welcome
         elif not user:
             return MessageFormatter.welcome_message()
         
+        # Handle unknown commands
         else:
-            return MessageFormatter.invalid_command_message()
+            if user and user.is_kyc_completed:
+                return MessageFormatter.invalid_command_message()
+            else:
+                return MessageFormatter.welcome_message()
     
     def _handle_session_state(self, user: User, message: str, intent: str) -> str:
         """Handle message based on current session state"""
@@ -95,14 +127,19 @@ class CommandHandler:
             return self._handle_otp_input(user, message, intent)
         
         else:
-            # Clear invalid session state
+            # Clear invalid session state and handle normally
+            logger.warning(f"User {user.phone_number} had invalid session state: {state}")
             user.clear_session()
             return self._handle_intent(user, user.phone_number, message, intent)
     
     def _handle_greeting(self, user: Optional[User], phone_number: str) -> str:
         """Handle greeting message"""
         if user and user.is_kyc_completed:
-            return f"Hello! Welcome back to SatChat. Your balance is {self._get_user_balance(user)} BTC. How can I help you today?"
+            # Get balance for returning user
+            balance = self._get_user_balance(user)
+            return f"👋 *Hello! Welcome back to SatChat.*\n\n💰 Your balance: {balance} BTC\n\nHow can I help you today?\n\nTry: Balance • Send • History • Address • Help"
+        elif user and not user.is_kyc_completed:
+            return f"👋 *Welcome back!*\n\nYour account setup is not complete. Reply *YES* to continue registration."
         else:
             return MessageFormatter.welcome_message()
     
@@ -140,26 +177,40 @@ class CommandHandler:
         """Handle name input during registration"""
         from utils.validators import UserValidator
         
+        # First check if user is trying to cancel
+        if normalize_text(message) in ['cancel', 'stop', 'exit', 'quit', 'no']:
+            user.clear_session()
+            return "Registration cancelled. Reply *YES* anytime to start again."
+        
         validation = UserValidator.validate_full_name(message)
         if not validation['valid']:
-            return f"❌ {validation['error']}\n\nPlease provide your full name (first and last name):"
+            return f"❌ {validation['error']}\n\nPlease provide your full name (first and last name):\n\n_Or reply CANCEL to stop._"
         
         user.full_name = validation['name']
         user.update_session('awaiting_email')
         user.save()
         
-        return "Thank you! Now please provide your email address:"
+        log_user_action(user.phone_number, "name_provided", user.full_name)
+        
+        return f"Great! Hi *{user.full_name}*\n\nNow please provide your email address:"
     
     def _handle_email_input(self, user: User, message: str) -> str:
         """Handle email input during registration"""
         from utils.validators import UserValidator
         
+        # First check if user is trying to cancel
+        if normalize_text(message) in ['cancel', 'stop', 'exit', 'quit', 'no']:
+            user.clear_session()
+            return "Registration cancelled. Reply *YES* anytime to start again."
+        
         validation = UserValidator.validate_email(message)
         if not validation['valid']:
-            return f"❌ {validation['error']}\n\nPlease provide a valid email address:"
+            return f"❌ {validation['error']}\n\nPlease provide a valid email address:\n\n_Or reply CANCEL to stop._"
         
         user.email = validation['email']
         user.save()
+        
+        log_user_action(user.phone_number, "email_provided", user.email)
         
         # Complete Bitnob account creation
         return self._complete_bitnob_registration(user)
@@ -168,6 +219,9 @@ class CommandHandler:
         """Complete Bitnob account creation"""
         try:
             from services.bitnob_service import create_bitnob_account
+            
+            # Show progress message
+            logger.info(f"Creating Bitnob account for {user.phone_number}")
             
             # Create Bitnob account
             account_data = create_bitnob_account(
@@ -178,9 +232,12 @@ class CommandHandler:
             )
             
             if not account_data:
+                logger.error(f"Bitnob account creation failed for {user.phone_number}")
                 user.clear_session()
                 return MessageFormatter.error_message(
-                    "Failed to create your Bitcoin wallet. Please try again later or contact support."
+                    "⚠️ Failed to create your Bitcoin wallet.\n\n"
+                    "This might be temporary. Please try again in a few minutes or reply *YES* to retry.\n\n"
+                    "If the problem persists, contact support."
                 )
             
             # Update user with Bitnob data
@@ -192,11 +249,15 @@ class CommandHandler:
             user.clear_session()
             user.save()
             
-            log_user_action(user.phone_number, "registration_completed")
+            log_user_action(user.phone_number, "registration_completed", 
+                          f"Customer ID: {account_data['customer_id']}")
+            
+            # Get initial balance
+            initial_balance = self._get_user_balance(user) or "0.00000000"
             
             return MessageFormatter.account_created_message(
                 user.bitcoin_address,
-                "0.00000000"
+                initial_balance
             )
             
         except Exception as e:

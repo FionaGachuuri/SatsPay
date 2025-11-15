@@ -8,6 +8,31 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def normalize_text(message: str) -> str:
+    """Normalize message text - trim whitespace and convert to lowercase"""
+    if not message:
+        return ""
+    return message.strip().lower()
+
+def strip_sandbox_prefix(message: str) -> str:
+    """Remove Twilio Sandbox join phrases from message"""
+    if not message:
+        return ""
+    
+    # Common Twilio sandbox patterns
+    sandbox_patterns = [
+        r'^join\s+\w+\s+',  # "join xxxx "
+        r'^join\s+\w+[-_]\w+\s+',  # "join xxx-xxx " or "join xxx_xxx "
+        r'^sandbox\s+',  # "sandbox "
+    ]
+    
+    cleaned_message = message.strip()
+    
+    for pattern in sandbox_patterns:
+        cleaned_message = re.sub(pattern, '', cleaned_message, flags=re.IGNORECASE)
+    
+    return cleaned_message.strip()
+
 def normalize_phone_number(phone: str) -> str:
     """Normalize phone number to international format"""
     # Remove all non-digit characters
@@ -183,49 +208,113 @@ def truncate_address(address: str, start_chars: int = 6, end_chars: int = 4) -> 
     return f"{address[:start_chars]}...{address[-end_chars:]}"
 
 def detect_message_intent(message: str) -> str:
-    """Detect user intent from message"""
-    message = message.strip().lower()
+    """Detect user intent from message with improved case-insensitive matching"""
+    # First normalize the message
+    normalized = normalize_text(message)
+    
+    # Confirmation patterns (YES, yes, Yes, etc.)
+    confirm_patterns = [
+        r'^(yes|y|ok|okay|confirm|sure|yep|yeah|yup|si|oui)$',
+        r'^(create|start|begin)\s+(account|wallet|bitcoin|btc)',
+        r'^(i\s+want|want\s+to|please)\s+(create|start|begin)',
+    ]
+    
+    for pattern in confirm_patterns:
+        if re.search(pattern, normalized):
+            return 'confirm'
+    
+    # Cancel patterns
+    cancel_patterns = [
+        r'^(no|n|nope|cancel|stop|exit|quit|abort)$',
+    ]
+    
+    for pattern in cancel_patterns:
+        if re.search(pattern, normalized):
+            return 'cancel'
     
     # Greeting patterns
-    greetings = ['hi', 'hello', 'hey', 'start', 'begin']
-    if any(greeting in message for greeting in greetings):
-        return 'greeting'
+    greeting_patterns = [
+        r'^(hi|hello|hey|start|begin|good\s+(morning|afternoon|evening))$',
+        r'^\w*(hi|hello|hey)\w*$',
+    ]
     
-    # Send patterns
-    send_patterns = ['send', 'transfer', 'pay']
-    if any(pattern in message for pattern in send_patterns):
-        return 'send'
+    for pattern in greeting_patterns:
+        if re.search(pattern, normalized):
+            return 'greeting'
     
-    # Balance patterns
-    balance_patterns = ['balance', 'bal', 'money', 'funds']
-    if any(pattern in message for pattern in balance_patterns):
-        return 'balance'
+    # Send/Transfer patterns
+    send_patterns = [
+        r'(send|transfer|pay|give)\s+.*\s*(btc|bitcoin)',
+        r'(send|transfer|pay|give)\s+[\d.]+',
+        r'i\s+(want\s+to\s+|need\s+to\s+)?(send|transfer|pay)',
+    ]
+    
+    for pattern in send_patterns:
+        if re.search(pattern, normalized):
+            return 'send'
+    
+    # Balance patterns - expanded with natural language
+    balance_patterns = [
+        r'^(balance|bal|money|funds|wallet)$',
+        r'(check|show|what.*is|how.*much).*balance',
+        r'(my|current|account)\s+(balance|money|funds)',
+        r'how\s+much\s+(do\s+i\s+have|money|bitcoin|btc)',
+        r'(what.*balance|balance.*have)',
+    ]
+    
+    for pattern in balance_patterns:
+        if re.search(pattern, normalized):
+            return 'balance'
     
     # History patterns
-    history_patterns = ['history', 'transactions', 'activity']
-    if any(pattern in message for pattern in history_patterns):
-        return 'history'
+    history_patterns = [
+        r'^(history|transactions|activity|statement)$',
+        r'(show|view|check|get).*history',
+        r'(my|recent|past)\s+(transactions|history|activity)',
+        r'transaction\s+(history|list)',
+    ]
     
-    # Address patterns
-    address_patterns = ['address', 'receive', 'deposit']
-    if any(pattern in message for pattern in address_patterns):
-        return 'address'
+    for pattern in history_patterns:
+        if re.search(pattern, normalized):
+            return 'history'
+    
+    # Address patterns - expanded with wallet creation requests
+    address_patterns = [
+        r'^(address|receive|deposit)$',
+        r'(my|bitcoin|btc|wallet)\s+(address|id)',
+        r'(receive|get)\s+(bitcoin|btc|money)',
+        r'(create|make|generate).*wallet',
+        r'how\s+to\s+receive',
+        r'where.*send.*me',
+    ]
+    
+    for pattern in address_patterns:
+        if re.search(pattern, normalized):
+            return 'address'
     
     # Help patterns
-    help_patterns = ['help', 'support', 'assist']
-    if any(pattern in message for pattern in help_patterns):
-        return 'help'
+    help_patterns = [
+        r'^(help|support|assist|info|information|\?)$',
+        r'(need|want)\s+(help|support|assistance)',
+        r'(how\s+do\s+i|what\s+can)',
+        r'commands?',
+    ]
     
-    # Yes/No patterns
-    if message in ['yes', 'y', 'ok', 'okay', 'confirm']:
-        return 'confirm'
-    
-    if message in ['no', 'n', 'cancel', 'stop']:
-        return 'cancel'
+    for pattern in help_patterns:
+        if re.search(pattern, normalized):
+            return 'help'
     
     # Check if it's an OTP (6 digits)
-    if re.match(r'^\d{6}$', message):
+    if re.match(r'^\d{6}$', normalized):
         return 'otp'
+    
+    # Check if it's a valid name (for registration)
+    if len(normalized.split()) >= 2 and all(word.isalpha() for word in normalized.split()):
+        return 'name_input'
+    
+    # Check if it's an email
+    if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', normalized):
+        return 'email_input'
     
     # Default to unknown
     return 'unknown'
