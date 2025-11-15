@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, Tuple
 import logging
-from models.user import User, Transaction, TransactionType, TransactionStatus, get_user_by_phone
+from models.user import User, Transaction, TransactionType, TransactionStatus, UserStatus, get_user_by_phone
 from services.bitnob_service import BitnobService
 from services.twilio_service import MessageFormatter
 from services.otp_service import OTPService, OTPPurpose
@@ -245,7 +245,7 @@ class CommandHandler:
             user.bitnob_wallet_id = account_data['wallet_id']
             user.bitcoin_address = account_data['bitcoin_address']
             user.is_kyc_completed = True
-            user.status = user.UserStatus.ACTIVE
+            user.status = UserStatus.ACTIVE
             user.clear_session()
             user.save()
             
