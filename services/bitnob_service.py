@@ -110,42 +110,83 @@ class BitnobService:
         
         return result
     
-    def create_wallet(self, customer_id: str) -> Dict[str, Any]:
-        """Create a Bitcoin wallet for customer"""
-        data = {
-            'customerId': customer_id,
-            'currency': 'BTC'
-        }
+    def get_bitcoin_wallet(self) -> Dict[str, Any]:
+        """Get the company's Bitcoin wallet (wallets are at company level, not customer level)"""
+        logger.info("Getting company Bitcoin wallet")
         
-        logger.info(f"Creating Bitcoin wallet for customer {customer_id}")
+        result = self._make_request('GET', '/api/v1/wallets')
         
-        # Use the correct API endpoint
-        result = self._make_request('POST', '/api/v1/wallets', data)
+        if result.get('error'):
+            logger.error(f"Failed to get wallets: {result.get('message')}")
+            return result
         
-        if not result.get('error'):
-            logger.info(f"Wallet created successfully: {result.get('data', {}).get('id')}")
+        # Find the Bitcoin wallet
+        wallets = result.get('data', [])
+        bitcoin_wallet = None
+        
+        for wallet in wallets:
+            if wallet.get('currency', '').lower() == 'btc' or wallet.get('type') == 'bitcoin':
+                bitcoin_wallet = wallet
+                break
+        
+        if bitcoin_wallet:
+            logger.info(f"Found Bitcoin wallet: {bitcoin_wallet['id']}")
+            return {
+                'error': False,
+                'data': bitcoin_wallet
+            }
         else:
-            logger.error(f"Failed to create wallet: {result.get('message')}")
-        
-        return result
+            logger.error("No Bitcoin wallet found")
+            return {
+                'error': True,
+                'message': 'No Bitcoin wallet found for this company'
+            }
     
     def get_wallet_balance(self, wallet_id: str) -> Dict[str, Any]:
         """Get wallet balance"""
         logger.info(f"Getting balance for wallet {wallet_id}")
-        result = self._make_request('GET', f'/api/v1/wallets/{wallet_id}/balance')
         
-        if result.get('error'):
-            logger.error(f"Failed to get wallet balance: {result.get('message')}")
+        # Get all wallets and find the specified one
+        wallets_result = self._make_request('GET', '/api/v1/wallets')
         
-        return result
+        if wallets_result.get('error'):
+            logger.error(f"Failed to get wallets: {wallets_result.get('message')}")
+            return wallets_result
+        
+        # Find the specific wallet
+        wallets = wallets_result.get('data', [])
+        for wallet in wallets:
+            if wallet.get('id') == wallet_id:
+                logger.info(f"Balance retrieved successfully for wallet {wallet_id}")
+                return {
+                    'error': False,
+                    'data': {
+                        'balance': wallet.get('balance', {}),
+                        'currency': wallet.get('currency'),
+                        'wallet_id': wallet_id
+                    }
+                }
+        
+        logger.error(f"Wallet {wallet_id} not found")
+        return {
+            'error': True,
+            'message': f'Wallet {wallet_id} not found'
+        }
     
-    def get_wallet_address(self, wallet_id: str) -> Dict[str, Any]:
-        """Get wallet Bitcoin address"""
-        logger.info(f"Getting address for wallet {wallet_id}")
-        result = self._make_request('GET', f'/api/v1/wallets/{wallet_id}/address')
+    def generate_customer_address(self, customer_email: str) -> Dict[str, Any]:
+        """Generate a Bitcoin address for a customer"""
+        logger.info(f"Generating Bitcoin address for customer {customer_email}")
         
-        if result.get('error'):
-            logger.error(f"Failed to get wallet address: {result.get('message')}")
+        data = {
+            'customerEmail': customer_email
+        }
+        
+        result = self._make_request('POST', '/api/v1/addresses/generate', data)
+        
+        if not result.get('error'):
+            logger.info(f"Address generated successfully: {result.get('data', {}).get('address')}")
+        else:
+            logger.error(f"Failed to generate address: {result.get('message')}")
         
         return result
     
@@ -302,22 +343,23 @@ def create_bitnob_account(bitnob_service: BitnobService, full_name: str, email: 
         
         customer_id = customer_result['data']['id']
         
-        # Create wallet
-        wallet_result = bitnob_service.create_wallet(customer_id)
+        # Get the company's Bitcoin wallet (wallets are at company level)
+        wallet_result = bitnob_service.get_bitcoin_wallet()
         if wallet_result.get('error'):
             return None
         
         wallet_id = wallet_result['data']['id']
         
-        # Get wallet address
-        address_result = bitnob_service.get_wallet_address(wallet_id)
+        # Generate Bitcoin address for this customer
+        address_result = bitnob_service.generate_customer_address(email)
         if address_result.get('error'):
             return None
         
         return {
             'customer_id': customer_id,
             'wallet_id': wallet_id,
-            'bitcoin_address': address_result['data']['address']
+            'bitcoin_address': address_result['data']['address'],
+            'address_id': address_result['data']['id']
         }
         
     except Exception as e:
